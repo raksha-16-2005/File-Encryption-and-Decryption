@@ -1,0 +1,191 @@
+import javax.crypto.Cipher;
+import javax.crypto.SecretKey;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
+import javax.crypto.spec.SecretKeySpec;
+import java.io.*;
+import java.security.SecureRandom;
+import java.security.spec.KeySpec;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+// Abstract class for Abstraction
+abstract class FileProcessor {
+    protected SecretKey key;
+
+    public FileProcessor(SecretKey key) {
+        this.key = key;
+    }
+
+    public abstract void process(File inputFile, File outputFile) throws Exception;
+}
+
+// Encryptor class
+class Encryptor extends FileProcessor {
+
+    public Encryptor(SecretKey key) {
+        super(key);
+    }
+
+    @Override
+    public void process(File inputFile, File outputFile) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+        cipher.init(Cipher.ENCRYPT_MODE, key);
+
+        try (FileInputStream fis = new FileInputStream(inputFile);
+             FileOutputStream fos = new FileOutputStream(outputFile)) {
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+            byte[] iv = cipher.getIV();
+            fos.write(iv); // Write IV to the beginning of the file
+
+            while ((bytesRead = fis.read(buffer)) != -1) {
+                byte[] encryptedBytes = cipher.update(buffer, 0, bytesRead);
+                if (encryptedBytes != null) fos.write(encryptedBytes);
+            }
+            byte[] finalBytes = cipher.doFinal();
+            if (finalBytes != null) fos.write(finalBytes);
+        }
+    }
+}
+
+// Decryptor class
+class Decryptor extends FileProcessor {
+
+    public Decryptor(SecretKey key) {
+        super(key);
+    }
+
+    @Override
+    public void process(File inputFile, File outputFile) throws Exception {
+        try (FileInputStream fis = new FileInputStream(inputFile);
+             FileOutputStream fos = new FileOutputStream(outputFile)) {
+            byte[] iv = new byte[16];
+            fis.read(iv); // Read IV from the beginning of the file
+            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+            cipher.init(Cipher.DECRYPT_MODE, key, new javax.crypto.spec.IvParameterSpec(iv));
+
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+
+            while ((bytesRead = fis.read(buffer)) != -1) {
+                byte[] decryptedBytes = cipher.update(buffer, 0, bytesRead);
+                if (decryptedBytes != null) fos.write(decryptedBytes);
+            }
+            byte[] finalBytes = cipher.doFinal();
+            if (finalBytes != null) fos.write(finalBytes);
+        }
+    }
+}
+
+// Utility class
+class CryptoUtils {
+    public static byte[] generateSalt() {
+        byte[] salt = new byte[16];
+        new SecureRandom().nextBytes(salt);
+        return salt;
+    }
+
+    public static SecretKey deriveKeyFromPassword(String password, byte[] salt, int keySize) throws Exception {
+        SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
+        KeySpec spec = new PBEKeySpec(password.toCharArray(), salt, 65536, keySize);
+        byte[] keyBytes = factory.generateSecret(spec).getEncoded();
+        return new SecretKeySpec(keyBytes, "AES");
+    }
+}
+
+// Multi-threaded processor
+class MultiThreadProcessor {
+
+    public void processFilesInParallel(FileProcessor processor, File[] inputFiles, File[] outputFiles, int threadCount) {
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        try {
+            for (int i = 0; i < inputFiles.length; i++) {
+                final int index = i;
+                executor.submit(() -> {
+                    try {
+                        if (!inputFiles[index].exists()) {
+                            System.err.println("File not found: " + inputFiles[index].getAbsolutePath());
+                            return;
+                        }
+                        processor.process(inputFiles[index], outputFiles[index]);
+                    } catch (Exception e) {
+                        System.err.println("Error processing file: " + inputFiles[index].getName());
+                        e.printStackTrace();
+                    }
+                });
+            }
+        } finally {
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(60, java.util.concurrent.TimeUnit.SECONDS)) {
+                    System.err.println("Thread pool did not terminate!");
+                }
+            } catch (InterruptedException e) {
+                System.err.println("Thread pool interrupted: " + e.getMessage());
+            }
+        }
+    }
+}
+
+// Main class
+public class Main {
+    public static void main(String[] args) {
+        try {
+            // File paths
+            File inputFile = new File("C:\\Users\\ADMIN\\IdeaProjects\\practice\\src\\example.txt");
+            File encryptedFile = new File("C:\\Users\\ADMIN\\IdeaProjects\\practice\\src\\encrypted_example.txt");
+            File decryptedFile = new File("C:\\Users\\ADMIN\\IdeaProjects\\practice\\src\\decrypted_example.txt");
+
+            if (!inputFile.exists()) {
+                System.err.println("Input file not found: " + inputFile.getAbsolutePath());
+                return;
+            }
+
+            // Key and salt generation
+            String password = "strongpassword";
+            byte[] salt = CryptoUtils.generateSalt();
+
+            // Save salt
+            try (FileOutputStream fos = new FileOutputStream("salt.dat")) {
+                fos.write(salt);
+            }
+
+            SecretKey key = CryptoUtils.deriveKeyFromPassword(password, salt, 256);
+
+            // Encryption
+            Encryptor encryptor = new Encryptor(key);
+            encryptor.process(inputFile, encryptedFile);
+            System.out.println("Encryption complete!");
+
+            // Load salt
+            byte[] loadedSalt = new byte[16];
+            try (FileInputStream fis = new FileInputStream("salt.dat")) {
+                fis.read(loadedSalt);
+            }
+
+            SecretKey keyForDecryption = CryptoUtils.deriveKeyFromPassword(password, loadedSalt, 256);
+
+            // Decryption
+            Decryptor decryptor = new Decryptor(keyForDecryption);
+            decryptor.process(encryptedFile, decryptedFile);
+            System.out.println("Decryption complete!");
+
+            // Multi-threaded processing
+            File[] inputFiles = {inputFile};
+            File[] encryptedFiles = {new File("file1.encrypted")};
+            File[] decryptedFiles = {new File("file1.decrypted")};
+
+            MultiThreadProcessor processor = new MultiThreadProcessor();
+            processor.processFilesInParallel(new Encryptor(key), inputFiles, encryptedFiles, 2);
+            System.out.println("Parallel encryption complete!");
+
+            processor.processFilesInParallel(new Decryptor(key), encryptedFiles, decryptedFiles, 2);
+            System.out.println("Parallel decryption complete!");
+
+        } catch (Exception e) {
+            System.err.println("Error: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+}
